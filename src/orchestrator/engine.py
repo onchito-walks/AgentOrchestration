@@ -24,6 +24,9 @@ class OrchestrationEngine:
             "on_error": [],
             "on_complete": [],
         }
+        # Parent-child task tracking to prevent orphaned subworkflows (#1040)
+        self._parent_map: Dict[str, List[str]] = {}  # parent_id -> [child_ids]
+        self._child_parent: Dict[str, str] = {}  # child_id -> parent_id
 
     def register_hook(self, event: str, callback: Callable) -> None:
         if event in self._hooks:
@@ -69,8 +72,30 @@ class OrchestrationEngine:
 
         except Exception as e:
             logger.error(f"Task {task_id} failed: {e}")
+            # Cancel any orphaned subworkflows spawned by this task (#1040)
+            self._cancel_orphaned_children(task_id)
             for hook in self._hooks["on_error"]:
                 await hook(task, e)
+
+    def spawn_subworkflow(self, parent_id: str, child_task: Dict) -> str:
+        """Create a subworkflow child of parent_id and return child task id.
+
+        If the parent task later fails, all orphaned children are
+        automatically cancelled.
+        """
+        child_id = self.scheduler.enqueue(child_task)
+        self._parent_map.setdefault(parent_id, []).append(child_id)
+        self._child_parent[child_id] = parent_id
+        logger.info("Subworkflow %s spawned by parent %s", child_id, parent_id)
+        return child_id
+
+    def _cancel_orphaned_children(self, parent_id: str) -> None:
+        """Cancel all child tasks of a failed parent."""
+        children = self._parent_map.pop(parent_id, [])
+        for child_id in children:
+            self._child_parent.pop(child_id, None)
+            self.scheduler.complete(child_id)  # Remove from in-flight
+            logger.warning("Cancelled orphaned subworkflow %s (parent %s failed)", child_id, parent_id)
 
     async def _run_agent_task(self, agent: Dict, task: Dict) -> Any:
         loop = asyncio.get_event_loop()
