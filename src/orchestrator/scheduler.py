@@ -31,21 +31,34 @@ class PriorityQueue:
 
 
 class TaskScheduler:
-    def __init__(self):
+    def __init__(self, max_per_tenant: int = 5):
         self._queues: Dict[str, PriorityQueue] = {}
+        self._tenant_queues: Dict[str, Dict[str, PriorityQueue]] = {}  # queue -> tenant -> queue
         self._scheduled: Dict[str, float] = {}
         self._in_flight: Dict[str, Dict] = {}
         self._max_retries = 3
+        self._tenant_max = max_per_tenant
+        # Per-tenant in-flight counters for concurrency enforcement (#1079, #950)
+        self._tenant_in_flight: Dict[str, int] = {}
+        # Round-robin index for fair dequeue across tenants
+        self._tenant_round_robin: Dict[str, int] = {}
 
     def enqueue(self, task: Dict, queue: str = "default", priority: int = 0) -> str:
         task_id = str(uuid4())
         task["id"] = task_id
         task["enqueued_at"] = time.time()
         task["retries"] = 0
+        tenant = task.get("tenant") or task.get("metadata", {}).get("tenant", "default")
+        task["_tenant"] = tenant
 
         if queue not in self._queues:
             self._queues[queue] = PriorityQueue()
-        self._queues[queue].push(task, priority)
+            self._tenant_queues[queue] = {}
+            self._tenant_round_robin[queue] = 0
+        if tenant not in self._tenant_queues[queue]:
+            self._tenant_queues[queue][tenant] = PriorityQueue()
+        self._tenant_queues[queue][tenant].push(task, priority)
+        self._queues[queue].push(task, priority)  # global queue for count
         return task_id
 
     def schedule(self, task: Dict, delay: float, queue: str = "default", priority: int = 0) -> str:
@@ -62,19 +75,42 @@ class TaskScheduler:
             if task:
                 self.enqueue(task, queue)
 
-        if queue in self._queues and len(self._queues[queue]) > 0:
-            task = self._queues[queue].pop()
+        if queue not in self._tenant_queues or not self._tenant_queues[queue]:
+            return None
+
+        # Greedy tenant dispatch: find first tenant with both capacity and tasks
+        tenants = list(self._tenant_queues[queue].keys())
+        if not tenants:
+            return None
+
+        for tenant in tenants:
+            tq = self._tenant_queues[queue][tenant]
+            if len(tq) == 0:
+                continue
+            if self._tenant_in_flight.get(tenant, 0) >= self._tenant_max:
+                continue
+            # Eligible tenant with capacity
+            task = tq.pop()
             if task:
+                self._tenant_in_flight[tenant] = self._tenant_in_flight.get(tenant, 0) + 1
                 self._in_flight[task["id"]] = task
                 return task
+
         return None
 
     def complete(self, task_id: str) -> bool:
-        return self._in_flight.pop(task_id, None) is not None
+        task = self._in_flight.pop(task_id, None)
+        if task:
+            tenant = task.get("_tenant", "default")
+            self._tenant_in_flight[tenant] = max(0, self._tenant_in_flight.get(tenant, 0) - 1)
+            return True
+        return False
 
     def fail(self, task_id: str, queue: str = "default") -> bool:
         task = self._in_flight.pop(task_id, None)
         if task:
+            tenant = task.get("_tenant", "default")
+            self._tenant_in_flight[tenant] = max(0, self._tenant_in_flight.get(tenant, 0) - 1)
             task["retries"] += 1
             if task["retries"] < self._max_retries:
                 self.enqueue(task, queue, priority=task.get("priority", 0))
