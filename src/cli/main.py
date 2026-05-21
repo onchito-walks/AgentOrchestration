@@ -1,16 +1,25 @@
-"""CLI entry point for the agent orchestrator."""
+"""CLI entry point for the agent orchestrator.
+
+Includes migration gate for safe deploys (issue #969).
+"""
 
 import argparse
 import sys
+import logging
 
 from src.common.config import Config
 from src.common.logging import configure_logging
+from src.common.migration import MigrationManager, MigrationError
+
+logger = logging.getLogger(__name__)
 
 
 def cli():
     parser = argparse.ArgumentParser(description="Agent Orchestrator CLI")
     parser.add_argument("--config", "-c", help="Path to config file")
     parser.add_argument("--verbose", "-v", action="store_true", help="Enable verbose output")
+    parser.add_argument("--migrations-dir", default=None,
+                        help="Path to migrations directory")
 
     subparsers = parser.add_subparsers(dest="command", help="Available commands")
 
@@ -19,6 +28,14 @@ def cli():
 
     deploy_parser = subparsers.add_parser("deploy", help="Deploy an agent")
     deploy_parser.add_argument("manifest", help="Path to agent manifest file")
+    deploy_parser.add_argument("--skip-migrations", action="store_true",
+                               help="Skip migration gate (not recommended)")
+
+    migrate_parser = subparsers.add_parser("migrate", help="Run database migrations")
+    migrate_parser.add_argument("--check", action="store_true",
+                                help="Compatibility check only, no execution")
+    migrate_parser.add_argument("--direction", choices=["up", "down"], default="up",
+                                help="Migration direction")
 
     status_parser = subparsers.add_parser("status", help="Show agent status")
     status_parser.add_argument("--watch", "-w", action="store_true", help="Watch mode")
@@ -36,8 +53,54 @@ def cli():
 
     if args.command == "init":
         print(f"Initializing project: {args.name}")
+
     elif args.command == "deploy":
+        migrations_dir = args.migrations_dir or "migrations"
+        if not args.skip_migrations:
+            print(f"🔒 Migration gate active — checking {migrations_dir}...")
+            mm = MigrationManager(migrations_dir)
+            try:
+                gate_ok = mm.deploy_gate()
+            except Exception as e:
+                print(f"❌ Migration gate error: {e}")
+                sys.exit(1)
+
+            if not gate_ok:
+                print("❌ Deploy BLOCKED by migration gate")
+                sys.exit(1)
+            print("✅ Migration gate passed — proceeding with deploy")
+        else:
+            print("⚠️  Migrations skipped (--skip-migrations)")
         print(f"Deploying agent from manifest: {args.manifest}")
+
+    elif args.command == "migrate":
+        migrations_dir = args.migrations_dir or "migrations"
+        mm = MigrationManager(migrations_dir)
+        mm.discover()
+        pending = mm.pending()
+        if args.check:
+            compat = mm.compatibility_check()
+            if compat["compatible"]:
+                print(f"✅ All {len(pending)} pending migrations are forward-compatible")
+            else:
+                print(f"⚠️  {compat['incompatible_count']} incompatible migration(s) flagged:")
+                for v in compat["flagged"]:
+                    print(f"   ❌ {v}")
+                sys.exit(1)
+        else:
+            if not pending:
+                print("No pending migrations")
+                return
+            print(f"Running {len(pending)} migration(s)...")
+            try:
+                results = mm.run_pending()
+                for ver, status in results:
+                    print(f"   ✅ {ver}")
+                print("All migrations applied")
+            except MigrationError as e:
+                print(f"❌ Migration failed: {e}")
+                sys.exit(1)
+
     elif args.command == "status":
         print("Checking agent status...")
     elif args.command == "logs":

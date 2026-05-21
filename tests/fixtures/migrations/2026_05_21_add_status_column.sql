@@ -1,0 +1,1 @@
+ALTER TABLE agents ADD COLUMN status VARCHAR(32) DEFAULT 'active';
