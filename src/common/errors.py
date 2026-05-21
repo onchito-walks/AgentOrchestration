@@ -41,6 +41,30 @@ class ResourceExhaustedError(AgentOrchestratorError):
     def __init__(self, resource: str):
         super().__init__(f"Resource exhausted: {resource}")
 
+
+class WorkflowExecutionError(AgentOrchestratorError):
+    """Raised when a workflow cannot execute due to rollback or dependency issues."""
+    def __init__(self, workflow_name: str, reason: str):
+        super().__init__(f"Cannot execute workflow '{workflow_name}': {reason}")
+        self.workflow_name = workflow_name
+        self.reason = reason
+
+
+class DuplicateNodeError(AgentOrchestratorError):
+    """Raised when a duplicate node identifier is detected during workflow
+    registration, YAML import, or step addition.
+
+    Validation happens at the registration / pre-dispatch boundary so
+    the bad graph cannot start executing.
+    """
+    def __init__(self, node_id: str, context: str = ""):
+        msg = f"Duplicate node identifier: '{node_id}'"
+        if context:
+            msg += f" ({context})"
+        super().__init__(msg)
+        self.node_id = node_id
+        self.context = context
+
 # 2019-01-25T13:21:06 update
 
 # 2019-02-15T19:31:32 update
