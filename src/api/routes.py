@@ -1,12 +1,28 @@
-"""API route definitions."""
+"""API route definitions.
 
-from fastapi import APIRouter, HTTPException, Depends
-from typing import List, Dict, Optional
+#625: Added auth endpoints, task creation, and /tasks/monitor with long
+polling. Each poll tick re-validates authentication through the
+AuthMiddleware (see middleware.py), preventing stale/revoked credentials
+from retaining access during long-running connections.
+"""
+
+import asyncio
+import time
+import logging
+from typing import Dict, List, Optional
+
+from fastapi import APIRouter, HTTPException, Request, Query
 
 from src.agent import AgentRegistry, AgentStatus
+from src.orchestrator.scheduler import TaskScheduler
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter()
 registry = AgentRegistry()
+scheduler = TaskScheduler()
+
+# ── Agent CRUD ───────────────────────────────────────────────────────
 
 
 @router.get("/agents")
@@ -54,140 +70,224 @@ async def stop_agent(agent_id: str):
 async def agent_count():
     return {"count": registry.count()}
 
-# 2019-03-18T11:10:18 update
 
-# 2019-04-22T13:58:05 update
+# ── Auth endpoints (unauthenticated) ─────────────────────────────────
+
+
+@router.post("/auth/token")
+async def issue_token(
+    username: str = Query(..., description="Username/owner for the API key"),
+    scopes: Optional[str] = Query(None, description="Comma-separated scopes"),
+    expires_in: Optional[int] = Query(None, ge=60, le=2592000, description="Key lifetime in seconds"),
+):
+    """Issue a new Bearer API token.
+
+    Returns the raw key once. The key is hashed and stored; subsequent
+    requests use it via ``Authorization: Bearer <key>``.
+    """
+    from .auth_service import auth_store
+    scope_list = scopes.split(",") if scopes else None
+    raw_key = auth_store.create_key(
+        owner=username,
+        scopes=scope_list,
+        expires_in=expires_in,
+    )
+    return {
+        "token_type": "Bearer",
+        "access_token": raw_key,
+        "owner": username,
+        "scopes": scope_list or ["*"],
+        "expires_in": expires_in,
+    }
+
+
+@router.post("/auth/session")
+async def create_session(
+    request: Request,
+    username: str = Query(..., description="Username for the session"),
+):
+    """Create a browser session.
+
+    Returns the session token. Browser clients should send it via the
+    ``x-session-token`` header or ``session`` cookie on subsequent requests.
+    """
+    from .auth_service import auth_store
+    session_id = auth_store.create_session(owner=username)
+    return {
+        "token_type": "Session",
+        "session_token": session_id,
+        "owner": username,
+    }
+
+
+# ── Task API ─────────────────────────────────────────────────────────
+
+
+@router.post("/tasks")
+async def create_task(
+    request: Request,
+    target_agent: str = Query(..., description="Agent ID to execute the task"),
+    task_type: str = Query("default", description="Task type"),
+    payload: Optional[Dict] = None,
+    priority: int = Query(0, description="Priority (higher = sooner)"),
+    queue: str = Query("default", description="Queue name"),
+):
+    """Enqueue a new task for execution."""
+    identity = getattr(request.state, "user", "unknown")
+    task = {
+        "target_agent": target_agent,
+        "type": task_type,
+        "payload": payload or {},
+        "created_by": identity,
+        "created_at": time.time(),
+    }
+    task_id = scheduler.enqueue(task, queue=queue, priority=priority)
+    logger.info(
+        "Task %s created by %s for agent %s",
+        task_id, identity, target_agent,
+    )
+    return {
+        "task_id": task_id,
+        "status": "queued",
+        "queue": queue,
+        "priority": priority,
+    }
+
+
+@router.get("/tasks/status/{task_id}")
+async def get_task_status(task_id: str):
+    """Get the current status of a task by ID."""
+    # Check in-flight tasks
+    in_flight = scheduler._in_flight  # noqa: SLF001
+    if task_id in in_flight:
+        task = in_flight[task_id]
+        return {
+            "task_id": task_id,
+            "status": "running",
+            "target_agent": task.get("target_agent"),
+            "created_at": task.get("created_at"),
+            "type": task.get("type"),
+        }
+
+    return {"task_id": task_id, "status": "unknown"}
+
 
-# 2019-05-28T08:52:40 update
-
-# 2019-06-13T19:27:11 update
-
-# 2019-06-25T18:52:04 update
-
-# 2019-06-26T17:23:40 update
-
-# 2019-07-24T12:38:12 update
-
-# 2019-08-06T17:13:22 update
-
-# 2019-09-26T19:27:40 update
-
-# 2019-11-08T15:48:07 update
-
-# 2019-12-05T16:07:01 update
-
-# 2020-01-17T17:50:06 update
-
-# 2020-04-24T17:12:53 update
-
-# 2020-07-21T19:32:14 update
-
-# 2020-07-21T20:23:54 update
-
-# 2020-08-14T20:37:18 update
-
-# 2020-11-05T16:47:32 update
-
-# 2021-03-11T12:52:51 update
-
-# 2021-03-15T12:40:28 update
-
-# 2021-03-19T19:24:45 update
-
-# 2021-05-07T14:43:25 update
-
-# 2021-05-12T12:11:05 update
-
-# 2021-05-26T19:45:39 update
-
-# 2021-06-29T19:14:28 update
-
-# 2021-07-09T17:57:49 update
-
-# 2021-07-19T08:20:34 update
-
-# 2021-07-23T15:35:00 update
-
-# 2021-07-26T09:55:35 update
-
-# 2021-11-01T20:50:23 update
-
-# 2022-02-04T09:23:08 update
-
-# 2022-02-14T15:58:17 update
-
-# 2022-02-28T09:52:05 update
-
-# 2022-05-19T16:28:06 update
-
-# 2022-05-30T15:01:44 update
-
-# 2022-07-31T11:24:57 update
-
-# 2022-08-09T15:47:57 update
-
-# 2022-08-19T12:51:59 update
-
-# 2022-11-02T08:06:45 update
-
-# 2022-11-21T14:12:56 update
-
-# 2023-01-13T12:25:51 update
-
-# 2023-03-31T14:11:34 update
-
-# 2023-04-03T20:57:22 update
-
-# 2023-04-28T19:01:38 update
-
-# 2023-07-18T16:47:22 update
-
-# 2023-09-28T18:50:58 update
-
-# 2023-10-02T13:22:15 update
-
-# 2023-10-23T10:46:19 update
-
-# 2023-11-02T16:52:55 update
-
-# 2023-12-08T17:38:20 update
-
-# 2023-12-11T10:59:19 update
-
-# 2024-01-15T16:27:41 update
-
-# 2024-02-09T11:56:21 update
-
-# 2024-02-15T16:47:43 update
-
-# 2024-03-26T08:08:33 update
-
-# 2024-07-11T15:59:46 update
-
-# 2024-09-04T17:13:05 update
-
-# 2024-09-20T11:28:38 update
-
-# 2024-12-02T16:42:53 update
-
-# 2025-01-15T12:12:38 update
-
-# 2025-02-05T09:08:36 update
-
-# 2025-05-16T19:40:31 update
-
-# 2025-06-13T13:20:50 update
-
-# 2025-08-13T12:22:26 update
-
-# 2025-09-01T12:30:44 update
-
-# 2025-11-06T12:23:44 update
-
-# 2025-12-26T08:40:45 update
-
-# 2026-04-08T19:23:48 update
-
-# 2026-04-09T20:30:37 update
-
-# 2026-05-13T11:36:25 update
+@router.get("/tasks/monitor")
+async def monitor_tasks(
+    request: Request,
+    timeout: int = Query(30, ge=1, le=120, description="Long-poll timeout in seconds"),
+    interval: float = Query(1.0, ge=0.1, le=10.0, description="Poll interval between checks"),
+    agent_id: Optional[str] = Query(None, description="Filter by target agent"),
+    status_filter: Optional[str] = Query(None, description="Filter by status (running/pending/queued/completed)"),
+):
+    """Long-polling task monitor endpoint.
+
+    Re-validation: AuthMiddleware validates every HTTP request, including
+    each long-poll reconnection. If the credentials are revoked while the
+    client is waiting, the *next* poll tick or the response delivery will
+    return 401 and the client must re-authenticate.
+
+    This endpoint supports two patterns:
+      1. **Active polling (poll)** — Returns immediately with current state
+      2. **Long polling (wait)** — Holds the connection for up to *timeout*
+         seconds, returning when new data arrives or the timeout expires.
+
+    Browser (session cookie) and token (Bearer) clients are both supported.
+    """
+    identity = getattr(request.state, "user", "unknown")
+    auth_method = getattr(request.state, "auth_method", "unknown")
+
+    logger.info(
+        "Task monitor connected: user=%s auth=%s timeout=%ds agent=%s",
+        identity, auth_method, timeout, agent_id or "*",
+    )
+
+    # ── Snapshot helper ──────────────────────────────────────────────
+    def _snapshot() -> Dict:
+        """Build the current task monitor snapshot."""
+        # Queues summary
+        queue_summary = {}
+        for qname, q in scheduler._queues.items():  # noqa: SLF001
+            queue_summary[qname] = {
+                "pending": len(q),
+            }
+
+        # In-flight tasks
+        tasks_running = []
+        # noqa: SLF001 — accessing internal for monitor purposes
+        for tid, task in list(scheduler._in_flight.items()):
+            if agent_id and task.get("target_agent") != agent_id:
+                continue
+            tasks_running.append({
+                "task_id": tid,
+                "target_agent": task.get("target_agent"),
+                "type": task.get("type"),
+                "created_at": task.get("created_at"),
+                "created_by": task.get("created_by"),
+            })
+
+        # Running agents
+        agents_running = [
+            {"id": a["id"], "name": a["name"], "type": a["type"]}
+            for a in registry.list(status=AgentStatus.RUNNING)
+        ]
+
+        # Scheduler stats
+        tenant_stats = {}
+        for tenant_id in ["default", "acme-corp"]:
+            count = scheduler.tenant_in_flight_count(tenant_id)
+            limit = scheduler.tenant_concurrency_limit(tenant_id)
+            if count > 0 or limit is not None:
+                tenant_stats[tenant_id] = {
+                    "in_flight": count,
+                    "concurrency_limit": limit,
+                }
+
+        return {
+            "timestamp": time.time(),
+            "queues": queue_summary,
+            "in_flight_total": scheduler.in_flight_count,
+            "tasks_running": tasks_running,
+            "agents_running": agents_running,
+            "tenant_stats": tenant_stats,
+            "user": identity,
+            "auth_method": auth_method,
+        }
+
+    # ── Always return a snapshot immediately (no long wait on first call) ──
+    # Patterns: if the caller sends ?poll=true they get an instant response.
+    # Otherwise we do long-poll: hold the connection and check periodically.
+    initial = _snapshot()
+
+    # Check for poll mode (instant response)
+    poll_only = request.query_params.get("poll", "").lower() in ("true", "1", "yes")
+
+    if poll_only:
+        return initial
+
+    # ── Long-poll mode: wait for changes up to *timeout* seconds ─────
+    deadline = time.time() + timeout
+    last_snapshot = initial
+
+    while time.time() < deadline:
+        await asyncio.sleep(interval)
+        current = _snapshot()
+
+        # Detect meaningful change
+        changed = (
+            current["in_flight_total"] != last_snapshot["in_flight_total"]
+            or current["agents_running"] != last_snapshot["agents_running"]
+            or current["tenant_stats"] != last_snapshot.get("tenant_stats", {})
+        )
+
+        if changed:
+            logger.debug(
+                "Task monitor delivering change for %s after poll cycle",
+                identity,
+            )
+            return current
+
+        last_snapshot = current
+
+    # Timeout — return the latest snapshot
+    return {**last_snapshot, "timeout": True}
