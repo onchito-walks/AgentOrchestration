@@ -11,6 +11,7 @@ from .routes import router
 from .middleware import AuthMiddleware, RateLimitMiddleware, LoggingMiddleware
 from src.middleware.path_normalization import PathNormalizationMiddleware
 from src.middleware.audit import AuditMiddleware
+from src.middleware.role_enforcement import RoleEnforcementMiddleware
 
 
 def create_app(config: Dict = None) -> FastAPI:
@@ -38,6 +39,8 @@ def create_app(config: Dict = None) -> FastAPI:
     app.add_middleware(AuthMiddleware)
     # Audit runs AFTER auth to ensure actor info is available (#597)
     app.add_middleware(AuditMiddleware)
+    # Role enforcement runs after auth to block unauthorized access (#552)
+    app.add_middleware(RoleEnforcementMiddleware)
     app.add_middleware(RateLimitMiddleware)
     app.add_middleware(LoggingMiddleware)
 
