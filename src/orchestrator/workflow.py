@@ -4,6 +4,19 @@ from enum import Enum
 from typing import Any, Callable, Dict, List, Optional
 from uuid import uuid4
 
+MAX_RETENTION_DAYS = 365
+MIN_RETENTION_DAYS = 0
+
+
+def validate_retention_policy(retention_days: int) -> None:
+    """Validate retention policy values. Raises ValueError if invalid."""
+    if not isinstance(retention_days, int):
+        raise ValueError(f"Retention days must be an integer, got {type(retention_days).__name__}")
+    if retention_days < MIN_RETENTION_DAYS:
+        raise ValueError(f"Retention days must be >= {MIN_RETENTION_DAYS}, got {retention_days}")
+    if retention_days > MAX_RETENTION_DAYS:
+        raise ValueError(f"Retention days must be <= {MAX_RETENTION_DAYS}, got {retention_days}")
+
 
 class StepStatus(Enum):
     PENDING = "pending"
@@ -26,10 +39,12 @@ class WorkflowStep:
 
 
 class Workflow:
-    def __init__(self, name: str, description: str = ""):
+    def __init__(self, name: str, description: str = "", retention_days: int = 30):
+        validate_retention_policy(retention_days)
         self.id = str(uuid4())
         self.name = name
         self.description = description
+        self.retention_days = retention_days
         self.steps: List[WorkflowStep] = []
         self._step_map: Dict[str, WorkflowStep] = {}
         self.status = StepStatus.PENDING
