@@ -10,9 +10,13 @@ registry = AgentRegistry()
 
 
 @router.get("/agents")
-async def list_agents(status: Optional[str] = None, group: Optional[str] = None):
+async def list_agents(status: Optional[str] = None, group: Optional[str] = None, limit: int = 50):
+    if limit < 1:
+        limit = 1
+    elif limit > 100:
+        limit = 100
     status_filter = AgentStatus(status) if status else None
-    return {"agents": registry.list(status=status_filter, group=group)}
+    return {"agents": registry.list(status=status_filter, group=group, limit=limit)}
 
 
 @router.post("/agents")
