@@ -24,6 +24,28 @@ class TestMetricsCollector:
         assert snapshot["histograms"]["response.time"]["count"] == 2
         assert snapshot["histograms"]["response.time"]["avg"] == 1.0
 
+    def test_gauge_rejects_non_numeric_string(self):
+        with pytest.raises(TypeError, match='Gauge value must be numeric, got str'):
+            self.metrics.gauge("memory.usage", "85.5")
+
+    def test_gauge_rejects_non_numeric_none(self):
+        with pytest.raises(TypeError, match='Gauge value must be numeric, got NoneType'):
+            self.metrics.gauge("memory.usage", None)
+
+    def test_gauge_rejects_non_numeric_list(self):
+        with pytest.raises(TypeError, match='Gauge value must be numeric, got list'):
+            self.metrics.gauge("memory.usage", [1, 2, 3])
+
+    def test_gauge_accepts_int(self):
+        self.metrics.gauge("cpu.count", 4)
+        snapshot = self.metrics.snapshot()
+        assert snapshot["gauges"]["cpu.count"] == 4
+
+    def test_gauge_accepts_float(self):
+        self.metrics.gauge("memory.usage", 85.5)
+        snapshot = self.metrics.snapshot()
+        assert snapshot["gauges"]["memory.usage"] == 85.5
+
     def test_timer(self):
         self.metrics.start_timer("operation")
         import time

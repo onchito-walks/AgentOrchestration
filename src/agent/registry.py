@@ -45,14 +45,21 @@ class AgentRegistry:
     def get(self, agent_id: str) -> Optional[Dict[str, Any]]:
         return self._agents.get(agent_id)
 
-    def list(self, status: Optional[AgentStatus] = None, group: Optional[str] = None) -> List[Dict[str, Any]]:
+    def list(self, status: Optional[AgentStatus] = None, group: Optional[str] = None, limit: Optional[int] = None) -> List[Dict[str, Any]]:
         agents = self._agents.values()
         if status:
             agents = [a for a in agents if a["status"] == status.value]
         if group:
             agent_ids = self._index.get(group, [])
             agents = [a for a in agents if a["id"] in agent_ids]
-        return list(agents)
+        result = list(agents)
+        if limit is not None:
+            if limit < 1:
+                limit = 1
+            if limit > 100:
+                limit = 100
+            result = result[:limit]
+        return result
 
     def update_status(self, agent_id: str, status: AgentStatus) -> bool:
         if agent_id not in self._agents:
