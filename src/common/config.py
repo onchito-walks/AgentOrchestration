@@ -6,6 +6,9 @@ from typing import Any, Dict, Optional
 
 
 class Config:
+    _BOOLEAN_TRUE = frozenset({"true", "1", "yes", "on"})
+    _BOOLEAN_FALSE = frozenset({"false", "0", "no", "off"})
+
     def __init__(self, config_path: Optional[str] = None):
         self._data: Dict[str, Any] = {}
         if config_path:
@@ -16,12 +19,46 @@ class Config:
         with open(path) as f:
             self._data = json.load(f)
 
+    @staticmethod
+    def _coerce_env_value(value: str) -> Any:
+        """Coerce environment variable strings to typed Python values.
+
+        Supports: booleans, integers, floats, JSON literals (null, arrays, objects),
+        and plain strings as fallback.
+        """
+        lower = value.lower()
+
+        if lower in Config._BOOLEAN_TRUE:
+            return True
+        if lower in Config._BOOLEAN_FALSE:
+            return False
+
+        if lower == "null":
+            return None
+
+        try:
+            return json.loads(value)
+        except (json.JSONDecodeError, ValueError):
+            pass
+
+        try:
+            return int(value)
+        except ValueError:
+            pass
+
+        try:
+            return float(value)
+        except ValueError:
+            pass
+
+        return value
+
     def _load_env_overrides(self) -> None:
         prefix = "AO_"
         for key, value in os.environ.items():
             if key.startswith(prefix):
                 config_key = key[len(prefix):].lower().replace("_", ".")
-                self._set_nested(config_key, value)
+                self._set_nested(config_key, self._coerce_env_value(value))
 
     def _set_nested(self, key: str, value: Any) -> None:
         parts = key.split(".")
