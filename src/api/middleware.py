@@ -10,6 +10,22 @@ from starlette.responses import Response
 logger = logging.getLogger(__name__)
 
 
+class BodySizeMiddleware(BaseHTTPMiddleware):
+    """Enforce max body size on artifact uploads."""
+    MAX_UPLOAD_BYTES = 10 * 1024 * 1024
+    MAX_ALLOWED = 100 * 1024 * 1024
+
+    async def dispatch(self, request: Request, call_next: Callable) -> Response:
+        content_length = request.headers.get("content-length")
+        if content_length:
+            size = int(content_length)
+            if size > self.MAX_ALLOWED:
+                return Response(status_code=413, content=f"Request body too large. Max: {self.MAX_ALLOWED // (1024*1024)}MB")
+            if size > self.MAX_UPLOAD_BYTES and ("/artifacts" in request.url.path or "/upload" in request.url.path):
+                return Response(status_code=413, content=f"Upload too large. Max: {self.MAX_UPLOAD_BYTES // (1024*1024)}MB")
+        return await call_next(request)
+
+
 class AuthMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request: Request, call_next: Callable) -> Response:
         if request.url.path.startswith("/api/v2") and request.url.path != "/api/v2/auth/token":
