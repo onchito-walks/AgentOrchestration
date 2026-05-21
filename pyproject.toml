@@ -22,9 +22,13 @@ ao = "src.cli.main:cli"
 dev-dependencies = [
     "pytest>=7.0",
     "pytest-cov>=4.0",
+    "pytest-asyncio>=0.23.0",
     "flake8>=6.0",
     "mypy>=1.0",
 ]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
 
 # 2019-01-04T18:40:00 update
 

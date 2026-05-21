@@ -2,12 +2,37 @@
 
 import time
 import logging
-from typing import Callable
+import hashlib
+from typing import Callable, Set
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
 from starlette.responses import Response
 
 logger = logging.getLogger(__name__)
+
+
+class TokenRevocation:
+    """In-memory token revocation registry.
+
+    Tracks revoked token identifiers (JTI values) so that long-poll
+    sessions can periodically re-check whether the bearer token is
+    still valid.
+    """
+
+    def __init__(self):
+        self._revoked: Set[str] = set()
+
+    def revoke(self, jti: str) -> None:
+        self._revoked.add(jti)
+
+    def is_revoked(self, jti: str) -> bool:
+        return jti in self._revoked
+
+    def clear(self) -> None:
+        self._revoked.clear()
+
+# Shared revocation registry — importable by other modules.
+revocation = TokenRevocation()
 
 
 class AuthMiddleware(BaseHTTPMiddleware):
@@ -16,6 +41,23 @@ class AuthMiddleware(BaseHTTPMiddleware):
             token = request.headers.get("Authorization", "")
             if not token.startswith("Bearer "):
                 return Response(status_code=401, content="Unauthorized")
+
+            # For long-poll / monitor endpoints, check revocation status.
+            if "/monitor" in request.url.path or "/poll" in request.url.path:
+                token_value = token[len("Bearer "):]
+                # Derive a stable token fingerprint (simple jti surrogate).
+                fp = hashlib.sha256(token_value.encode()).hexdigest()[:16]
+                if revocation.is_revoked(fp):
+                    logger.warning(
+                        "Revoked token used on %s %s",
+                        request.method,
+                        request.url.path,
+                    )
+                    return Response(
+                        status_code=401,
+                        content="Token has been revoked",
+                    )
+
         return await call_next(request)
 
 
