@@ -1,7 +1,8 @@
-"""Task Scheduler — Priority-based task queuing and dispatch."""
+"""Task Scheduler — Priority-based task queuing and dispatch with jitter retry."""
 
 import asyncio
 import heapq
+import random
 import time
 from typing import Any, Dict, Optional
 from uuid import uuid4
@@ -31,17 +32,20 @@ class PriorityQueue:
 
 
 class TaskScheduler:
-    def __init__(self):
+    def __init__(self, max_retries: int = 3, base_delay: float = 1.0, max_delay: float = 60.0):
         self._queues: Dict[str, PriorityQueue] = {}
         self._scheduled: Dict[str, float] = {}
         self._in_flight: Dict[str, Dict] = {}
-        self._max_retries = 3
+        self._max_retries = max_retries or 3
+        self._base_delay = base_delay
+        self._max_delay = max_delay
 
     def enqueue(self, task: Dict, queue: str = "default", priority: int = 0) -> str:
         task_id = str(uuid4())
         task["id"] = task_id
         task["enqueued_at"] = time.time()
-        task["retries"] = 0
+        if "retries" not in task:
+            task["retries"] = 0
 
         if queue not in self._queues:
             self._queues[queue] = PriorityQueue()
@@ -72,14 +76,26 @@ class TaskScheduler:
     def complete(self, task_id: str) -> bool:
         return self._in_flight.pop(task_id, None) is not None
 
+    def _compute_backoff(self, retry_count: int) -> float:
+        """Exponential backoff with jitter: base * 2^retry + random(0, base)"""
+        delay = min(self._base_delay * (2 ** retry_count), self._max_delay)
+        jitter = random.uniform(0, self._base_delay)
+        return delay + jitter
+
     def fail(self, task_id: str, queue: str = "default") -> bool:
         task = self._in_flight.pop(task_id, None)
         if task:
             task["retries"] += 1
             if task["retries"] < self._max_retries:
+                backoff = self._compute_backoff(task["retries"])
+                task["next_retry_at"] = time.time() + backoff
                 self.enqueue(task, queue, priority=task.get("priority", 0))
                 return True
         return False
+
+    def fail_with_jitter(self, task_id: str, queue: str = "default") -> bool:
+        """Same as fail() but explicitly documents jitter behavior. Delegates to fail()."""
+        return self.fail(task_id, queue)
 
 # 2019-04-25T08:37:12 update
 
