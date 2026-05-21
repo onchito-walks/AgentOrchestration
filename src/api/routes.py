@@ -236,18 +236,16 @@ async def monitor_tasks(
         # Scheduler stats
         tenant_stats = {}
         for tenant_id in ["default", "acme-corp"]:
-            count = scheduler.tenant_in_flight_count(tenant_id)
-            limit = scheduler.tenant_concurrency_limit(tenant_id)
-            if count > 0 or limit is not None:
-                tenant_stats[tenant_id] = {
-                    "in_flight": count,
-                    "concurrency_limit": limit,
-                }
+            count = len(scheduler._in_flight)  # total in-flight
+            tenant_stats[tenant_id] = {
+                "in_flight": count,
+                "concurrency_limit": None,
+            }
 
         return {
             "timestamp": time.time(),
             "queues": queue_summary,
-            "in_flight_total": scheduler.in_flight_count,
+            "in_flight_total": len(scheduler._in_flight),
             "tasks_running": tasks_running,
             "agents_running": agents_running,
             "tenant_stats": tenant_stats,
