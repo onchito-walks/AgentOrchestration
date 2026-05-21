@@ -36,6 +36,239 @@ class TestTaskScheduler:
         task = asyncio.run(self.scheduler.dequeue())
         assert self.scheduler.fail(task["id"])
 
+    # ── Per-tenant concurrency tests ──────────────────────────────────
+
+    def test_set_tenant_concurrency_limits_capacity(self):
+        """Tasks should be dequeued when tenant is within its concurrency limit."""
+        self.scheduler.set_tenant_concurrency("acme-corp", 1)
+        self.scheduler.enqueue({"type": "test", "tenant_id": "acme-corp"})
+
+        import asyncio
+        task = asyncio.run(self.scheduler.dequeue())
+        assert task is not None
+        assert task["type"] == "test"
+
+    def test_tenant_concurrency_at_limit_blocks_dequeue(self):
+        """When tenant is at capacity, dequeuing returns None and defers the task."""
+        self.scheduler.set_tenant_concurrency("acme-corp", 1)
+        # Enqueue two tasks for the same tenant
+        self.scheduler.enqueue({"type": "first", "tenant_id": "acme-corp"})
+        self.scheduler.enqueue({"type": "second", "tenant_id": "acme-corp"})
+
+        import asyncio
+        # First dequeue should succeed (within limit)
+        first = asyncio.run(self.scheduler.dequeue())
+        assert first is not None
+        assert first["type"] == "first"
+
+        # Second dequeue should be blocked (tenant at limit)
+        second = asyncio.run(self.scheduler.dequeue())
+        assert second is None
+
+    def test_tenant_concurrency_releases_on_complete(self):
+        """Completing a task releases the tenant slot, allowing the next task."""
+        self.scheduler.set_tenant_concurrency("acme-corp", 1)
+        self.scheduler.enqueue({"type": "a", "tenant_id": "acme-corp"})
+        self.scheduler.enqueue({"type": "b", "tenant_id": "acme-corp"})
+
+        import asyncio
+        a = asyncio.run(self.scheduler.dequeue())
+        assert a is not None and a["type"] == "a"
+
+        # Complete task 'a' — this releases the slot
+        assert self.scheduler.complete(a["id"])
+
+        # Now task 'b' should be available
+        b = asyncio.run(self.scheduler.dequeue())
+        assert b is not None
+        assert b["type"] == "b"
+
+    def test_tenant_concurrency_releases_on_fail(self):
+        """Failing a task releases the tenant slot, allowing the retry or next task."""
+        self.scheduler.set_tenant_concurrency("acme-corp", 1)
+        self.scheduler.enqueue({"type": "a", "tenant_id": "acme-corp"})
+
+        import asyncio
+        a = asyncio.run(self.scheduler.dequeue())
+        assert a is not None
+        assert self.scheduler.fail(a["id"])
+
+        # Slot released; task re-enqueued for retry
+        retry = asyncio.run(self.scheduler.dequeue())
+        assert retry is not None
+        assert retry["type"] == "a"
+
+    def test_multiple_tenants_share_capacity_independently(self):
+        """Different tenants have independent concurrency pools."""
+        self.scheduler.set_tenant_concurrency("tenant-a", 1)
+        self.scheduler.set_tenant_concurrency("tenant-b", 1)
+
+        self.scheduler.enqueue({"type": "a1", "tenant_id": "tenant-a"})
+        self.scheduler.enqueue({"type": "a2", "tenant_id": "tenant-a"})
+        self.scheduler.enqueue({"type": "b1", "tenant_id": "tenant-b"})
+
+        import asyncio
+        # Both tenants can have one in-flight simultaneously
+        a1 = asyncio.run(self.scheduler.dequeue())
+        assert a1 is not None and a1["type"] == "a1"
+
+        # Second pop hits a2 (same tenant, at limit) → deferred back, returns None
+        assert asyncio.run(self.scheduler.dequeue()) is None
+
+        # Third pop gets b1 (other tenant, within limit)
+        b1 = asyncio.run(self.scheduler.dequeue())
+        assert b1 is not None and b1["type"] == "b1"
+
+        # Tenant-a cannot take more (at limit)
+        assert asyncio.run(self.scheduler.dequeue()) is None
+
+    def test_unlimited_tenant_is_unaffected_by_concurrency(self):
+        """Tenants without a concurrency limit are never blocked."""
+        # don't set a limit for this tenant
+        self.scheduler.enqueue({"type": "a", "tenant_id": "unlimited"})
+        self.scheduler.enqueue({"type": "b", "tenant_id": "unlimited"})
+        self.scheduler.enqueue({"type": "c", "tenant_id": "unlimited"})
+
+        import asyncio
+        assert (asyncio.run(self.scheduler.dequeue()))["type"] == "a"
+        assert (asyncio.run(self.scheduler.dequeue()))["type"] == "b"
+        assert (asyncio.run(self.scheduler.dequeue()))["type"] == "c"
+
+    def test_remove_concurrency_limit_restores_unlimited(self):
+        """Setting concurrency to ≤0 removes the limit."""
+        self.scheduler.set_tenant_concurrency("acme-corp", 1)
+        # Remove it
+        self.scheduler.set_tenant_concurrency("acme-corp", 0)
+
+        self.scheduler.enqueue({"type": "a", "tenant_id": "acme-corp"})
+        self.scheduler.enqueue({"type": "b", "tenant_id": "acme-corp"})
+
+        import asyncio
+        assert (asyncio.run(self.scheduler.dequeue()))["type"] == "a"
+        assert (asyncio.run(self.scheduler.dequeue()))["type"] == "b"
+
+    def test_default_tenant_id_for_tasks_without_tenant(self):
+        """Tasks without a tenant_id use the default tenant pool."""
+        self.scheduler.set_tenant_concurrency("default", 1)
+        self.scheduler.enqueue({"type": "first"})
+        self.scheduler.enqueue({"type": "second"})
+
+        import asyncio
+        assert (asyncio.run(self.scheduler.dequeue()))["type"] == "first"
+        assert asyncio.run(self.scheduler.dequeue()) is None
+
+    # ── Recovery scanner tests ──────────────────────────────────────
+
+    def test_recover_in_flight_requeues_tasks_within_capacity(self):
+        """recover_in_flight re-queues recovered tasks when tenant has capacity."""
+        self.scheduler.set_tenant_concurrency("acme-corp", 2)
+        recovered_tasks = [
+            {"tenant_id": "acme-corp", "type": "recovered-a", "queue": "default", "priority": 5},
+            {"tenant_id": "acme-corp", "type": "recovered-b", "queue": "default", "priority": 3},
+        ]
+        result = self.scheduler.recover_in_flight(recovered_tasks)
+
+        assert len(result["recovered"]) == 2
+        assert len(result["deferred"]) == 0
+
+        import asyncio
+        a = asyncio.run(self.scheduler.dequeue())
+        b = asyncio.run(self.scheduler.dequeue())
+        assert a["type"] == "recovered-a"
+        assert b["type"] == "recovered-b"
+        assert a.get("recovered") is True
+
+    def test_recover_in_flight_defers_when_tenant_at_capacity(self):
+        """recover_in_flight defers tasks when tenant is already at concurrency limit."""
+        self.scheduler.set_tenant_concurrency("acme-corp", 1)
+
+        # Fill the slot
+        self.scheduler.enqueue({"type": "filler", "tenant_id": "acme-corp"})
+        import asyncio
+        filler = asyncio.run(self.scheduler.dequeue())
+        assert filler is not None
+
+        # Now recover with another task for the same tenant
+        result = self.scheduler.recover_in_flight([
+            {"tenant_id": "acme-corp", "type": "recovered"},
+        ])
+
+        assert len(result["recovered"]) == 0
+        assert len(result["deferred"]) == 1
+        assert result["deferred"][0]["type"] == "recovered"
+
+    def test_recover_in_flight_mixed_tenants(self):
+        """recover_in_flight handles multiple tenants correctly."""
+        self.scheduler.set_tenant_concurrency("busy", 1)
+        self.scheduler.set_tenant_concurrency("free", 5)
+
+        # Fill busy tenant's slot
+        self.scheduler.enqueue({"type": "occupied", "tenant_id": "busy"})
+        import asyncio
+        asyncio.run(self.scheduler.dequeue())
+
+        # Recover tasks for both tenants
+        result = self.scheduler.recover_in_flight([
+            {"tenant_id": "busy", "type": "should-defer"},
+            {"tenant_id": "free", "type": "should-recover"},
+        ])
+
+        assert len(result["deferred"]) == 1
+        assert result["deferred"][0]["type"] == "should-defer"
+        assert len(result["recovered"]) == 1
+        assert result["recovered"][0]["type"] == "should-recover"
+
+    def test_recover_in_flight_in_flight_counts_match(self):
+        """After recovery, in-flight counts reflect the newly acquired tenant slots."""
+        self.scheduler.set_tenant_concurrency("acme", 5)
+
+        self.scheduler.recover_in_flight([
+            {"tenant_id": "acme", "type": "t1"},
+            {"tenant_id": "acme", "type": "t2"},
+        ])
+
+        # Both should be recovered (limit is 5)
+        # They were in the queue, but we haven't dequeued yet
+        # The slots were acquired during recover_in_flight
+        assert self.scheduler.tenant_in_flight_count("acme") == 2
+
+        import asyncio
+        t1 = asyncio.run(self.scheduler.dequeue())
+        assert t1 is not None
+        # After dequeue, the slot is already counted — dequeue
+        # reuses the slot acquired during recovery
+        assert self.scheduler.tenant_in_flight_count("acme") == 2
+
+        # Complete one, slot releases to 1
+        assert self.scheduler.complete(t1["id"])
+        assert self.scheduler.tenant_in_flight_count("acme") == 1
+
+    def test_recover_in_flight_empty_list(self):
+        """recover_in_flight with empty list returns empty results."""
+        result = self.scheduler.recover_in_flight([])
+        assert result["recovered"] == []
+        assert result["deferred"] == []
+
+    def test_in_flight_count_property(self):
+        """in_flight_count returns the current number of in-flight tasks."""
+        assert self.scheduler.in_flight_count == 0
+
+        self.scheduler.enqueue({"type": "a", "tenant_id": "t1"})
+        import asyncio
+        a = asyncio.run(self.scheduler.dequeue())
+        assert self.scheduler.in_flight_count == 1
+
+        self.scheduler.complete(a["id"])
+        assert self.scheduler.in_flight_count == 0
+
+    def test_tenant_concurrency_limit_accessor(self):
+        """tenant_concurrency_limit returns the configured limit or None."""
+        assert self.scheduler.tenant_concurrency_limit("unknown") is None
+        self.scheduler.set_tenant_concurrency("acme", 3)
+        assert self.scheduler.tenant_concurrency_limit("acme") == 3
+        self.scheduler.set_tenant_concurrency("acme", 0)
+        assert self.scheduler.tenant_concurrency_limit("acme") is None
+
 # 2019-01-09T19:07:03 update
 
 # 2019-02-18T12:30:02 update
