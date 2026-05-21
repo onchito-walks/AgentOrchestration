@@ -9,6 +9,7 @@ from fastapi.middleware.trustedhost import TrustedHostMiddleware
 
 from .routes import router
 from .middleware import AuthMiddleware, RateLimitMiddleware, LoggingMiddleware
+from src.middleware.path_normalization import PathNormalizationMiddleware
 
 
 def create_app(config: Dict = None) -> FastAPI:
@@ -29,6 +30,9 @@ def create_app(config: Dict = None) -> FastAPI:
     )
 
     app.add_middleware(TrustedHostMiddleware, allowed_hosts=os.getenv("TRUSTED_HOSTS", "*").split(","))
+
+    # Path normalisation MUST run before auth to prevent trailing-slash bypass.
+    app.add_middleware(PathNormalizationMiddleware)
 
     app.add_middleware(AuthMiddleware)
     app.add_middleware(RateLimitMiddleware)
