@@ -1,8 +1,20 @@
-# Agent Orchestration Platform for Enterprises
+# Agent Orchestration Platform
 
-**Enterprise-grade AI Agent Orchestration Framework**
+Enterprises are deploying AI agents faster than they can manage them. Every team
+builds its own agent, provisions its own keys, schedules its own tasks, and
+invents its own monitoring. The result is a sprawl of isolated agents that can''t
+talk to each other, can''t share resources, and can''t be audited as a system.
 
-A distributed platform for orchestrating autonomous AI agents in enterprise environments. Provides agent lifecycle management, inter-agent communication, task scheduling, and verifiable execution.
+AgentOrchestration is a distributed platform that brings order to that sprawl.
+It provides agent lifecycle management — register, deploy, scale, retire — with
+inter-agent communication, priority-based task scheduling, and resource-aware
+allocation. Agents discover each other through a shared registry. Tasks flow
+through a scheduler that knows what each agent can handle and what it costs.
+Every action leaves an audit trail.
+
+The platform exists because running one agent is a script. Running a hundred
+agents across three clouds with verifiable execution and cross-agent communication
+is an engineering problem that needs a platform, not more scripts.
 
 ## Architecture
 
